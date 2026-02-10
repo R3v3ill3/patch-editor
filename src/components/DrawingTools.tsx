@@ -72,10 +72,11 @@ export default function DrawingTools({
 
       try {
         const selectMode = new TerraDrawSelectMode({
+          pointerDistance: 12,
           flags: {
             polygon: {
               feature: {
-                draggable: true,
+                draggable: false,
                 coordinates: {
                   midpoints: { draggable: true },
                   draggable: true,
@@ -83,6 +84,14 @@ export default function DrawingTools({
                 },
               },
             },
+          },
+          styles: {
+            selectionPointWidth: 8,
+            selectionPointColor: '#2563eb',
+            selectionPointOutlineColor: '#ffffff',
+            selectionPointOutlineWidth: 2,
+            midPointWidth: 6,
+            selectedPolygonFillOpacity: 0.25,
           },
         });
 
@@ -94,6 +103,8 @@ export default function DrawingTools({
         });
 
         draw.start();
+        draw.on('select', (id) => console.log('[DrawingTools] terra-draw select event', id));
+        draw.on('deselect', () => console.log('[DrawingTools] terra-draw deselect event'));
         drawRef.current = draw;
       } catch (error) {
         console.error('Error initializing terra-draw:', error);
@@ -117,7 +128,11 @@ export default function DrawingTools({
     if (!draw) return;
 
     // Skip if mode hasn't changed
-    if (prevEditModeRef.current === editMode) return;
+    if (prevEditModeRef.current === editMode) {
+      console.log('[DrawingTools] Mode effect skipped (same mode)', editMode);
+      return;
+    }
+    console.log('[DrawingTools] Mode transition', { from: prevEditModeRef.current, to: editMode });
     prevEditModeRef.current = editMode;
 
     const clearFeatures = () => {
@@ -129,6 +144,10 @@ export default function DrawingTools({
 
     // ── SIMPLIFY-REFINE MODE: load simplified polygon for editing ──
     if (editMode === 'simplify-refine' && simplifiedGeometry && selectedPatch) {
+      console.log('[DrawingTools] Entering simplify-refine', {
+        prevMode: prevEditModeRef.current,
+        vertexCount: simplifiedGeometry.coordinates[0]?.[0]?.length ?? 0,
+      });
       onEditingPatchChange(selectedPatch.properties.id);
       clearFeatures();
 
@@ -148,22 +167,58 @@ export default function DrawingTools({
           properties: { mode: 'polygon' },
         }]);
 
-        const addedId = addResult?.[0]?.id;
+        const firstResult = addResult?.[0];
+        const addedId = firstResult?.id;
+        const isValid = firstResult?.valid !== false;
         const snapshot = draw.getSnapshot();
-        if (snapshot.length > 0 && addedId !== undefined && addedId !== null) {
+
+        console.log('[DrawingTools] addFeatures result', {
+          addResult,
+          addedId,
+          isValid,
+          snapshotLength: snapshot.length,
+          snapshotFeatureIds: snapshot.map(f => ({ id: f.id, type: f.geometry.type, mode: f.properties?.mode })),
+        });
+
+        if (snapshot.length > 0 && addedId != null && isValid) {
           setTimeout(() => {
             try {
-              draw.selectFeature(addedId as string | number);
+              console.log('[DrawingTools] Calling selectFeature', addedId);
+              draw.selectFeature(String(addedId));
+              const afterSelect = draw.getSnapshot();
+              const points = afterSelect.filter(f => f.geometry.type === 'Point');
+              const polygons = afterSelect.filter(f => f.geometry.type === 'Polygon');
+              console.log('[DrawingTools] After selectFeature', {
+                totalFeatures: afterSelect.length,
+                polygonCount: polygons.length,
+                pointCount: points.length,
+                pointSample: points.slice(0, 2).map(p => ({ id: p.id, props: p.properties })),
+              });
+              setTimeout(() => {
+                const delayed = draw.getSnapshot();
+                const delayedPoints = delayed.filter(f => f.geometry.type === 'Point');
+                console.log('[DrawingTools] 200ms after select', {
+                  totalFeatures: delayed.length,
+                  pointCount: delayedPoints.length,
+                });
+              }, 200);
             } catch (err) {
-              console.warn('Could not auto-select polygon:', err);
+              console.warn('[DrawingTools] Could not auto-select polygon:', err);
             }
           }, 100);
+        } else {
+          console.warn('[DrawingTools] Skipped selectFeature', {
+            snapshotLength: snapshot.length,
+            addedId,
+            isValid,
+          });
         }
       }
     }
 
     // ── DRAW MODE: draw new polygon ──
     else if (editMode === 'draw') {
+      console.log('[DrawingTools] Switching to draw mode');
       onEditingPatchChange(null);
       clearFeatures();
       draw.setMode('polygon');
@@ -171,6 +226,7 @@ export default function DrawingTools({
 
     // ── VIEW MODE / SIMPLIFY PREVIEW ──
     else if (editMode === 'view' || editMode === 'simplify') {
+      console.log('[DrawingTools] Switching to view/simplify', editMode);
       clearFeatures();
       if (editMode === 'view') onEditingPatchChange(null);
       try { draw.setMode('select'); } catch { /* ignore */ }
@@ -205,9 +261,20 @@ export default function DrawingTools({
   useEffect(() => {
     const handleExtractEdit = () => {
       const draw = drawRef.current;
-      if (!draw || editMode !== 'simplify-refine') return;
+      if (!draw || editMode !== 'simplify-refine') {
+        console.log('[DrawingTools] extract-edit-region ignored', { hasDraw: !!draw, editMode });
+        return;
+      }
 
       const snapshot = draw.getSnapshot();
+      const polygons = snapshot.filter(f => f.geometry.type === 'Polygon');
+      const points = snapshot.filter(f => f.geometry.type === 'Point');
+      console.log('[DrawingTools] extract-edit-region', {
+        snapshotLength: snapshot.length,
+        polygonCount: polygons.length,
+        pointCount: points.length,
+      });
+
       if (snapshot.length === 0) return;
 
       const feature = snapshot[0];
