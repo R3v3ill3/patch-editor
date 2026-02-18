@@ -24,7 +24,7 @@ import {
   analysePostEdit,
   extractSegmentFromRing,
   syncBoundaryByProjection,
-  syncBoundaryByDisplacement,
+  syncBoundaryExactCopy,
   generateBoundaryProposals,
   detectNeighbors,
   type PostEditAnalysis,
@@ -66,6 +66,7 @@ export default function EditorPage() {
   const [postEditPatchCode, setPostEditPatchCode] = useState<string>('');
   const [postEditNewGeometry, setPostEditNewGeometry] = useState<MultiPolygon | null>(null);
   const [postEditOldGeometry, setPostEditOldGeometry] = useState<MultiPolygon | null>(null);
+  const [postEditPreSimplifiedGeometry, setPostEditPreSimplifiedGeometry] = useState<MultiPolygon | null>(null);
   const [gapPreview, setGapPreview] = useState<GeoJSON.Feature | null>(null);
 
   // Pre-edit neighbor detection state (for linked boundary editing)
@@ -332,6 +333,7 @@ export default function EditorPage() {
           geometry,
           editor.workingFeatureCollection.features,
           oldGeometry,
+          editor.simplifiedGeometry,
         );
         console.log('[APPLY-BOUNDARY] Proposals generated', {proposalCount: proposals.length});
         for (const proposal of proposals) {
@@ -401,6 +403,7 @@ export default function EditorPage() {
         setPostEditPatchCode(patchCode);
         setPostEditNewGeometry(geometry);
         setPostEditOldGeometry(oldGeometry);
+        setPostEditPreSimplifiedGeometry(editor.simplifiedGeometry ?? null);
         setShowPostEditDialog(true);
 
         if (updatedAnalysis.gapGeometry) {
@@ -505,17 +508,21 @@ export default function EditorPage() {
 
       const { adjacentInfo } = neighbourInfo;
 
-      // Prefer displacement approach when old geometry is available
+      // Prefer exact-copy approach when old geometry is available
       let updatedNeighbour: MultiPolygon | null = null;
 
       if (postEditOldGeometry) {
         const oldRing = postEditOldGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
         const newRing = postEditNewGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
+        const preSimplifiedRing = postEditPreSimplifiedGeometry
+          ?.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex]
+          ?? null;
         if (oldRing && newRing) {
-          const { geometry, displacedCount } = syncBoundaryByDisplacement(
+          const { geometry, displacedCount } = syncBoundaryExactCopy(
             neighbourGeom,
             oldRing,
             newRing,
+            preSimplifiedRing,
             adjacentInfo.polygonIndex,
             adjacentInfo.ringIndex,
           );
@@ -525,7 +532,7 @@ export default function EditorPage() {
         }
       }
 
-      // Fallback to projection if displacement didn't work
+      // Fallback to projection if exact-copy didn't work
       if (!updatedNeighbour) {
         const editedRing = postEditNewGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
         if (!editedRing) {
@@ -604,6 +611,7 @@ export default function EditorPage() {
         postEditNewGeometry,
         editor.workingFeatureCollection.features,
         postEditOldGeometry ?? undefined,
+        postEditPreSimplifiedGeometry,
       );
 
       setAlignmentProposals(proposals);
@@ -612,7 +620,7 @@ export default function EditorPage() {
       console.error('Failed to generate boundary proposals:', err);
       showToast('Failed to generate alignment proposals', 'error');
     }
-  }, [postEditAnalysis, postEditNewGeometry, postEditOldGeometry, editor.workingFeatureCollection.features, showToast]);
+  }, [postEditAnalysis, postEditNewGeometry, postEditOldGeometry, postEditPreSimplifiedGeometry, editor.workingFeatureCollection.features, showToast]);
 
   const handleUpdateProposal = useCallback((patchId: string, newGeometry: MultiPolygon) => {
     setAlignmentProposals(prev =>
@@ -677,6 +685,7 @@ export default function EditorPage() {
     setPostEditPatchCode('');
     setPostEditNewGeometry(null);
     setPostEditOldGeometry(null);
+    setPostEditPreSimplifiedGeometry(null);
     setGapPreview(null);
   }, []);
 

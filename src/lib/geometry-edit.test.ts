@@ -8,6 +8,7 @@ import {
   syncAdjacentBoundaryImproved,
   syncBoundaryByProjection,
   syncBoundaryByDisplacement,
+  syncBoundaryExactCopy,
   generateBoundaryProposals,
   detectNeighbors,
   analysePostEdit,
@@ -1531,5 +1532,92 @@ test('generateBoundaryProposals uses displacement when oldEditedGeometry provide
     movedVertices.length >= 1,
     `expected ≥1 vertices displaced inward, got ${movedVertices.length}. ` +
     `x-values: ${proposedRing.map((v: Position) => v[0].toFixed(4))}`,
+  );
+});
+
+// ── syncBoundaryExactCopy tests ──────────────────────────────────────
+
+test('syncBoundaryExactCopy splices edited section into neighbour ring', () => {
+  // Using realistic coordinates
+  // Neighbour: detailed western boundary at x=150.002
+  const neighbourGeom = {
+    type: 'MultiPolygon' as const,
+    coordinates: [[[
+      [150.002, -33.0],
+      [150.002, -33.001],
+      [150.002, -33.002],
+      [150.002, -33.003],
+      [150.002, -33.004],
+      [150.006, -33.004],
+      [150.006, -33.0],
+      [150.002, -33.0],
+    ]]],
+  };
+
+  // Old original ring: eastern boundary at x=150.002
+  const oldOriginalRing: Position[] = [
+    [150.0, -33.0],
+    [150.002, -33.0],
+    [150.002, -33.001],
+    [150.002, -33.002],
+    [150.002, -33.003],
+    [150.002, -33.004],
+    [150.0, -33.004],
+    [150.0, -33.0],
+  ];
+
+  // Pre-edit simplified ring (same as old in this test)
+  const preSimplifiedRing: Position[] = [...oldOriginalRing];
+
+  // Post-edit ring: user moved middle vertices to x=150.001
+  const newEditedRing: Position[] = [
+    [150.0, -33.0],
+    [150.002, -33.0],       // unchanged anchor
+    [150.001, -33.001],     // EDITED
+    [150.001, -33.002],     // EDITED
+    [150.001, -33.003],     // EDITED
+    [150.002, -33.004],     // unchanged anchor
+    [150.0, -33.004],
+    [150.0, -33.0],
+  ];
+
+  const { geometry, displacedCount, changedSegment } = syncBoundaryExactCopy(
+    neighbourGeom,
+    oldOriginalRing,
+    newEditedRing,
+    preSimplifiedRing,
+    0, 0,
+  );
+
+  assert.ok(displacedCount > 0, 'should have displaced vertices');
+
+  const ring = geometry.coordinates[0][0];
+
+  // The edited section should be an EXACT COPY from the new ring.
+  // Find vertices at x≈150.001
+  const editedVertices = ring.filter(
+    (v: Position) => Math.abs(v[0] - 150.001) < 0.0001,
+  );
+  assert.ok(
+    editedVertices.length >= 2,
+    `expected ≥2 vertices at x≈150.001 (exact copy of edit), got ${editedVertices.length}`,
+  );
+
+  // Ring should still be closed
+  const lastV = ring[ring.length - 1];
+  assert.ok(
+    Math.abs(ring[0][0] - lastV[0]) < 1e-10 &&
+    Math.abs(ring[0][1] - lastV[1]) < 1e-10,
+    'ring should be closed',
+  );
+
+  // Non-shared vertices (at x=150.006) should be unchanged
+  const nonShared = ring.filter(
+    (v: Position) => Math.abs(v[0] - 150.006) < 0.0001,
+  );
+  assert.ok(
+    nonShared.length >= 2,
+    `non-shared vertices preserved: expected ≥2 at x≈150.006, got ${nonShared.length}. ` +
+    `Full ring: ${JSON.stringify(ring.map((v: Position) => [+v[0].toFixed(4), +v[1].toFixed(4)]))}`,
   );
 });

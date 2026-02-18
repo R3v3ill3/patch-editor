@@ -1493,6 +1493,261 @@ export function syncBoundaryByProjection(
 }
 
 /**
+ * Sync a neighbour's boundary by splicing in an **exact copy** of the
+ * edited section of the boundary.
+ *
+ * Instead of displacement or projection (which can produce wrong-side
+ * results), this function:
+ *   1. Compares `preEditSimplifiedRing` and `newEditedRing` to find the
+ *      vertices that the user actually moved.
+ *   2. Uses the unedited vertices adjacent to the edit as "anchor points".
+ *   3. Finds these anchor points on the neighbour's ring by proximity.
+ *   4. Replaces the section between the anchors on the neighbour's ring
+ *      with the edited section from `newEditedRing`.
+ *
+ * The result is that the neighbour gets *exactly* the same boundary as the
+ * edited patch in the edited section.  Unedited portions are untouched.
+ */
+export function syncBoundaryExactCopy(
+  neighbourGeometry: MultiPolygon,
+  oldOriginalRing: Position[],
+  newEditedRing: Position[],
+  preEditSimplifiedRing: Position[] | null,
+  polygonIndex: number,
+  ringIndex: number,
+): {
+  geometry: MultiPolygon;
+  quality: SnapQuality;
+  changedSegment: Position[];
+  connectionPoints: { start: Position; end: Position };
+  displacedCount: number;
+} {
+  const empty = {
+    geometry: neighbourGeometry,
+    quality: 'poor' as SnapQuality,
+    changedSegment: [] as Position[],
+    connectionPoints: { start: [0, 0] as Position, end: [0, 0] as Position },
+    displacedCount: 0,
+  };
+
+  const result: MultiPolygon = JSON.parse(JSON.stringify(neighbourGeometry));
+  const ring = result.coordinates[polygonIndex]?.[ringIndex];
+  if (!ring || ring.length < 4) return empty;
+
+  const nbrOpenCount = getOpenVertexCount(ring);
+  const newOpenCount = getOpenVertexCount(newEditedRing);
+  const oldOpenCount = getOpenVertexCount(oldOriginalRing);
+  if (nbrOpenCount < 3 || newOpenCount < 3 || oldOpenCount < 3) return empty;
+
+  // ── Step 1: Find the edited range on the new ring ────────────────
+  // Compare pre-edit simplified with post-edit to find which vertices moved.
+  // If pre-edit simplified is not available, compare old original with new.
+  const compareRing = preEditSimplifiedRing ?? oldOriginalRing;
+  const compareOpenCount = getOpenVertexCount(compareRing);
+
+  const EDIT_THRESHOLD_SQ = 1e-12; // ~0.001 m – anything larger is "edited"
+
+  let editStart = -1;
+  let editEnd = -1;
+
+  if (compareOpenCount === newOpenCount) {
+    // Same vertex count: compare index-by-index
+    for (let i = 0; i < newOpenCount; i++) {
+      const dx = newEditedRing[i][0] - compareRing[i][0];
+      const dy = newEditedRing[i][1] - compareRing[i][1];
+      if (dx * dx + dy * dy > EDIT_THRESHOLD_SQ) {
+        if (editStart === -1) editStart = i;
+        editEnd = i;
+      }
+    }
+  } else {
+    // Different vertex count: use geometric distance
+    for (let i = 0; i < newOpenCount; i++) {
+      const { distSq } = pointToRingDistDegSqWithIndex(
+        newEditedRing[i][0], newEditedRing[i][1],
+        compareRing, compareOpenCount,
+      );
+      if (distSq > EDIT_THRESHOLD_SQ) {
+        if (editStart === -1) editStart = i;
+        editEnd = i;
+      }
+    }
+  }
+
+  if (editStart === -1) return empty; // no edit detected
+
+  // ── Step 2: Choose anchor points ─────────────────────────────────
+  // Anchors must be UNEDITED vertices that are ALSO on the shared boundary
+  // (close to the old ring).  Search outward from the edit range.
+  const PROXIMITY_SQ = GEOMETRIC_TOLERANCE_DEG_SQ; // ~22 m
+
+  let anchorStartIdx = -1;
+  for (let i = editStart - 1; i >= 0; i--) {
+    const { distSq } = pointToRingDistDegSqWithIndex(
+      newEditedRing[i][0], newEditedRing[i][1],
+      oldOriginalRing, oldOpenCount,
+    );
+    if (distSq <= PROXIMITY_SQ) {
+      anchorStartIdx = i;
+      break;
+    }
+  }
+
+  let anchorEndIdx = -1;
+  for (let i = editEnd + 1; i < newOpenCount; i++) {
+    const { distSq } = pointToRingDistDegSqWithIndex(
+      newEditedRing[i][0], newEditedRing[i][1],
+      oldOriginalRing, oldOpenCount,
+    );
+    if (distSq <= PROXIMITY_SQ) {
+      anchorEndIdx = i;
+      break;
+    }
+  }
+
+  // If we couldn't find anchors on the shared boundary, fall back to
+  // the vertices immediately adjacent to the edit range
+  if (anchorStartIdx === -1) anchorStartIdx = Math.max(0, editStart - 1);
+  if (anchorEndIdx === -1) anchorEndIdx = Math.min(newOpenCount - 1, editEnd + 1);
+
+  const anchorStart = newEditedRing[anchorStartIdx];
+  const anchorEnd = newEditedRing[anchorEndIdx];
+
+  // ── Step 3: Find anchors on the neighbour's ring ─────────────────
+  // Search by proximity to the OLD original ring first, then verify
+  // the anchors are close to the expected positions.
+
+  // Find neighbour vertices close to the old boundary
+  const closeToOld: { idx: number; segIdx: number }[] = [];
+  const oldBBox = getRingBBox(oldOriginalRing);
+  const pad = Math.sqrt(PROXIMITY_SQ) + 0.0001;
+
+  for (let i = 0; i < nbrOpenCount; i++) {
+    const vx = ring[i][0], vy = ring[i][1];
+    if (
+      vx < oldBBox[0] - pad || vx > oldBBox[2] + pad ||
+      vy < oldBBox[1] - pad || vy > oldBBox[3] + pad
+    ) continue;
+
+    const { distSq } = pointToRingDistDegSqWithIndex(
+      vx, vy, oldOriginalRing, oldOpenCount,
+    );
+    if (distSq <= PROXIMITY_SQ) {
+      closeToOld.push({ idx: i, segIdx: i });
+    }
+  }
+
+  if (closeToOld.length < 2) return empty;
+
+  // Among the close-to-old vertices, find the ones closest to our anchors
+  let bestStartIdx = -1;
+  let bestStartDist = Infinity;
+  let bestEndIdx = -1;
+  let bestEndDist = Infinity;
+
+  for (const { idx } of closeToOld) {
+    const vx = ring[idx][0], vy = ring[idx][1];
+
+    const dxS = vx - anchorStart[0], dyS = vy - anchorStart[1];
+    const distS = dxS * dxS + dyS * dyS;
+    if (distS < bestStartDist) {
+      bestStartDist = distS;
+      bestStartIdx = idx;
+    }
+
+    const dxE = vx - anchorEnd[0], dyE = vy - anchorEnd[1];
+    const distE = dxE * dxE + dyE * dyE;
+    if (distE < bestEndDist) {
+      bestEndDist = distE;
+      bestEndIdx = idx;
+    }
+  }
+
+  if (bestStartIdx === -1 || bestEndIdx === -1) return empty;
+  if (bestStartIdx === bestEndIdx) return empty; // anchors collapsed
+
+  // ── Step 4: Extract replacement from the new edited ring ─────────
+  // Include anchor vertices for seamless connection
+  const replacement = extractSegmentFromRing(
+    newEditedRing, anchorStartIdx, anchorEndIdx,
+  );
+  if (replacement.length < 2) return empty;
+
+  // ── Step 5: Determine splice direction ───────────────────────────
+  // The neighbour's ring might go in the opposite direction.
+  // Check by comparing the order of anchors on the neighbour's ring.
+  let nbrSpliceStart: number;
+  let nbrSpliceEnd: number;
+  let needsReverse: boolean;
+
+  // The shared section on the neighbour goes from bestStartIdx to bestEndIdx.
+  // Determine which direction:
+  // If going from start→end in ring order covers fewer vertices, that's forward.
+  const fwdCount = (bestEndIdx - bestStartIdx + nbrOpenCount) % nbrOpenCount;
+  const bwdCount = (bestStartIdx - bestEndIdx + nbrOpenCount) % nbrOpenCount;
+
+  if (fwdCount <= bwdCount) {
+    // Forward: start→end in ring order
+    nbrSpliceStart = bestStartIdx;
+    nbrSpliceEnd = bestEndIdx;
+    needsReverse = false;
+  } else {
+    // Backward: end→start in ring order
+    nbrSpliceStart = bestEndIdx;
+    nbrSpliceEnd = bestStartIdx;
+    needsReverse = true;
+  }
+
+  // Build the replacement (reverse if needed)
+  const finalReplacement = needsReverse
+    ? [...replacement].reverse()
+    : [...replacement];
+
+  // ── Step 6: Splice ───────────────────────────────────────────────
+  // Replace nbrSpliceStart..nbrSpliceEnd with finalReplacement
+  let newRing: Position[];
+
+  if (nbrSpliceEnd >= nbrSpliceStart) {
+    // Simple case: no wrap-around
+    const before = ring.slice(0, nbrSpliceStart);
+    const after = ring.slice(nbrSpliceEnd + 1);
+    newRing = [...before, ...finalReplacement, ...after];
+  } else {
+    // Wrap-around case: splice wraps past ring closure
+    // Keep the middle (from nbrSpliceEnd+1 to nbrSpliceStart-1)
+    const middle = ring.slice(nbrSpliceEnd + 1, nbrSpliceStart);
+    newRing = [...finalReplacement, ...middle];
+  }
+
+  // Ensure ring is closed
+  if (newRing.length < 3) return empty;
+  const closingVertex = [...newRing[0]];
+  // Remove any existing closing vertex
+  const lastV = newRing[newRing.length - 1];
+  if (lastV[0] === closingVertex[0] && lastV[1] === closingVertex[1]) {
+    // Already closed, keep as-is
+  } else {
+    newRing.push(closingVertex);
+  }
+
+  // Validate minimum ring size
+  if (newRing.length < 4) return empty;
+
+  result.coordinates[polygonIndex][ringIndex] = newRing;
+
+  return {
+    geometry: result,
+    quality: 'good',
+    changedSegment: [...finalReplacement],
+    connectionPoints: {
+      start: [...finalReplacement[0]],
+      end: [...finalReplacement[finalReplacement.length - 1]],
+    },
+    displacedCount: finalReplacement.length,
+  };
+}
+
+/**
  * Compute the projected point on a ring edge and return both the point
  * and its squared distance from the query point.  O(openCount) per call.
  */
@@ -1704,6 +1959,7 @@ export function generateBoundaryProposals(
   editedGeometry: MultiPolygon,
   allPatches: PatchFeature[],
   oldEditedGeometry?: MultiPolygon,
+  preEditSimplifiedGeometry?: MultiPolygon | null,
 ): BoundaryProposal[] {
   const proposals: BoundaryProposal[] = [];
 
@@ -1732,12 +1988,15 @@ export function generateBoundaryProposals(
     );
     if (originalSegment.length < 2) continue;
 
-    // --- Displacement approach (preferred) ---
+    // --- Primary approach: exact-copy splice using anchor points ---
     if (oldEditedGeometry) {
       const oldRing =
         oldEditedGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
       const newRing =
         editedGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
+      const preSimplifiedRing = preEditSimplifiedGeometry
+        ?.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex]
+        ?? null;
 
       if (oldRing && newRing) {
         const {
@@ -1746,10 +2005,11 @@ export function generateBoundaryProposals(
           changedSegment,
           connectionPoints,
           displacedCount,
-        } = syncBoundaryByDisplacement(
+        } = syncBoundaryExactCopy(
           neighbourGeom,
           oldRing,
           newRing,
+          preSimplifiedRing,
           adjacentInfo.polygonIndex,
           adjacentInfo.ringIndex,
         );
@@ -1770,11 +2030,10 @@ export function generateBoundaryProposals(
           });
           continue;
         }
-        // displacedCount === 0 → fall through to projection fallback
       }
     }
 
-    // --- Fallback: projection approach ---
+    // --- Fallback: projection approach (index-based) ---
     const editedRing =
       editedGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
     if (!editedRing) continue;

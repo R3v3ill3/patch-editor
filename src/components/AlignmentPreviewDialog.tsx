@@ -847,27 +847,27 @@ export default function AlignmentPreviewDialog({
               <div className="absolute bottom-3 left-3 bg-white/90 rounded shadow px-3 py-2 z-10 text-[10px] space-y-1">
                 <div className="flex items-center gap-2">
                   <span className="inline-block w-5 h-0.5 bg-teal-500" />
-                  <span className="text-gray-700">Edited patch</span>
+                  <span className="text-gray-700">Edited patch boundary</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="inline-block w-5 h-0.5 border-t-2 border-dashed border-orange-500" />
-                  <span className="text-gray-700">Original shared boundary</span>
+                  <span className="text-gray-700">Original shared boundary (before edit)</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="inline-block w-5 h-0.5 bg-green-500" />
-                  <span className="text-gray-700">Proposed alignment (good)</span>
+                  <span className="text-gray-700">Proposed neighbour boundary (auto-apply)</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="inline-block w-5 h-0.5 bg-amber-500" />
-                  <span className="text-gray-700">Proposed alignment (needs review)</span>
+                  <span className="text-gray-700">Proposed neighbour boundary (needs review)</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="inline-block w-5 h-0.5 border-t-2 border-dashed border-gray-400" />
-                  <span className="text-gray-700">Neighbor original outline</span>
+                  <span className="text-gray-700">Neighbour current outline</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="inline-block w-5 h-0.5 bg-indigo-500" />
-                  <span className="text-gray-700">Neighbor proposed outline</span>
+                  <span className="text-gray-700">Neighbour outline after alignment</span>
                 </div>
               </div>
             </div>
