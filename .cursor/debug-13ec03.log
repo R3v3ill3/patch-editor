@@ -1,0 +1,4 @@
+{"sessionId":"13ec03","location":"page.tsx:247","message":"applyBoundaryEdit called","data":{"hasSelectedPatch":true,"vertexCount":258,"linkedCount":6},"timestamp":1771363459650,"runId":"debug1","hypothesisId":"H1"}
+{"sessionId":"13ec03","location":"page.tsx:291","message":"before analysePostEdit","data":{"patchId":"63af8ba2-e2d6-447d-9590-be63dcea55ab","preEditFeaturesCount":20,"oldVtx":9701,"newVtx":258},"timestamp":1771363459651,"runId":"debug1","hypothesisId":"H2"}
+{"sessionId":"13ec03","location":"page.tsx:300","message":"after analysePostEdit","data":{"neighbourCount":5,"duplicateCount":1,"hasGap":false,"gapAreaSqm":0},"timestamp":1771363468742,"runId":"debug1","hypothesisId":"H2"}
+{"sessionId":"13ec03","location":"page.tsx:437","message":"analysePostEdit caught error","data":{"error":"adjustedInfo is not defined"},"timestamp":1771363468778,"runId":"debug1","hypothesisId":"H4"}

@@ -10,6 +10,7 @@ interface PostEditDialogProps {
   analysis: PostEditAnalysis;
   onApplyToDuplicates: (patchIds: string[]) => void;
   onAlignNeighbours: (patchIds: string[]) => void;
+  onOpenAlignmentPreview: () => void;
   onCreateGapPatch: (gapGeometry: Feature<Polygon | MultiPolygon>) => void;
   onDone: () => void;
 }
@@ -20,6 +21,7 @@ export default function PostEditDialog({
   analysis,
   onApplyToDuplicates,
   onAlignNeighbours,
+  onOpenAlignmentPreview,
   onCreateGapPatch,
   onDone,
 }: PostEditDialogProps) {
@@ -99,68 +101,42 @@ export default function PostEditDialog({
             </div>
           )}
 
-          {/* 2. Neighbouring Patches (with checkboxes) */}
+          {/* 2. Neighbouring Patches */}
           {hasNeighbours && (
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-sm font-medium text-gray-700">
-                  Neighbouring Patches
-                </h3>
-                <div className="flex gap-2">
-                  <button
-                    onClick={selectAllNeighbours}
-                    className="text-[10px] text-blue-600 hover:underline"
-                  >
-                    Select all
-                  </button>
-                  <button
-                    onClick={deselectAllNeighbours}
-                    className="text-[10px] text-gray-500 hover:underline"
-                  >
-                    Clear
-                  </button>
-                </div>
-              </div>
-
-              <div className="border border-gray-200 rounded divide-y divide-gray-100">
-                {analysis.neighbours.map(n => (
-                  <label
-                    key={n.patchId}
-                    className="p-3 flex items-center gap-3 cursor-pointer hover:bg-gray-50"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedNeighbours.has(n.patchId)}
-                      onChange={() => toggleNeighbour(n.patchId)}
-                      className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
-                    />
-                    <div className="flex-1">
-                      <span className="text-sm font-medium text-gray-900">
-                        {n.patchCode}
-                      </span>
-                      <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${
+              <h3 className="text-sm font-medium text-gray-700 mb-2">
+                Neighbouring Patches
+              </h3>
+              <div className="bg-blue-50 border border-blue-200 rounded p-3">
+                <p className="text-sm text-blue-800 mb-2">
+                  {analysis.neighbours.length === 1
+                    ? '1 neighboring patch detected with potential gap or overlap.'
+                    : `${analysis.neighbours.length} neighboring patches detected with potential gaps or overlaps.`}
+                </p>
+                <div className="space-y-1 mb-3">
+                  {analysis.neighbours.map(n => (
+                    <div key={n.patchId} className="text-xs text-blue-700 flex items-center gap-2">
+                      <span>{n.patchCode}</span>
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${
                         n.relationship === 'overlap'
                           ? 'bg-red-100 text-red-700'
                           : n.relationship === 'gap'
                           ? 'bg-amber-100 text-amber-700'
                           : 'bg-green-100 text-green-700'
                       }`}>
-                        {n.relationship === 'overlap' ? 'Overlapping' :
+                        {n.relationship === 'overlap' ? 'Overlap' :
                          n.relationship === 'gap' ? 'Gap' : 'Aligned'}
                       </span>
                     </div>
-                  </label>
-                ))}
-              </div>
-
-              {selectedNeighbours.size > 0 && (
+                  ))}
+                </div>
                 <button
-                  onClick={() => onAlignNeighbours(Array.from(selectedNeighbours))}
-                  className="mt-2 w-full text-xs px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                  onClick={onOpenAlignmentPreview}
+                  className="w-full text-xs px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
                 >
-                  Align {selectedNeighbours.size} Selected Neighbour{selectedNeighbours.size !== 1 ? 's' : ''} to Match
+                  Review & Align Neighbors
                 </button>
-              )}
+              </div>
             </div>
           )}
 

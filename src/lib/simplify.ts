@@ -15,7 +15,16 @@ import type { Feature, MultiPolygon, Polygon, Position } from 'geojson';
  * @param geometry The original MultiPolygon
  * @param tolerance Simplification tolerance in degrees (~0.00001 = ~1m)
  */
-export function simplifyPatch(geometry: MultiPolygon, tolerance: number): MultiPolygon {
+export interface SimplifyOptions {
+  highQuality?: boolean;
+}
+
+export function simplifyPatch(
+  geometry: MultiPolygon,
+  tolerance: number,
+  options: SimplifyOptions = {}
+): MultiPolygon {
+  const { highQuality = true } = options;
   const feat: Feature<MultiPolygon> = {
     type: 'Feature',
     geometry,
@@ -24,7 +33,7 @@ export function simplifyPatch(geometry: MultiPolygon, tolerance: number): MultiP
 
   const simplified = turfSimplify(feat, {
     tolerance,
-    highQuality: true,
+    highQuality,
   }) as Feature<MultiPolygon>;
 
   return simplified.geometry;
@@ -62,10 +71,16 @@ function countVertices(geom: MultiPolygon): number {
 /**
  * Compute stats comparing original to simplified geometry.
  */
+export interface SimplifyStatsOptions {
+  includeDeviation?: boolean;
+}
+
 export function computeSimplifyStats(
   original: MultiPolygon,
-  simplified: MultiPolygon
+  simplified: MultiPolygon,
+  options: SimplifyStatsOptions = {}
 ): SimplifyStats {
+  const includeDeviation = options.includeDeviation !== false;
   const originalVertexCount = countVertices(original);
   const simplifiedVertexCount = countVertices(simplified);
   const reductionPercent = originalVertexCount > 0
@@ -80,7 +95,9 @@ export function computeSimplifyStats(
     : 0;
 
   // Max deviation: sample original vertices and find max distance to simplified edges
-  const maxDeviationMeters = computeMaxDeviation(original, simplified);
+  const maxDeviationMeters = includeDeviation
+    ? computeMaxDeviation(original, simplified)
+    : Number.NaN;
 
   return {
     originalVertexCount,
@@ -201,7 +218,8 @@ export function insertVertex(
  */
 export function findToleranceForTarget(
   geometry: MultiPolygon,
-  targetVertices: number
+  targetVertices: number,
+  options: SimplifyOptions = {}
 ): number {
   let lo = 0.0000001;
   let hi = 0.01;
@@ -209,7 +227,7 @@ export function findToleranceForTarget(
 
   for (let i = 0; i < 20; i++) {
     const mid = Math.sqrt(lo * hi); // geometric midpoint (log scale)
-    const simplified = simplifyPatch(geometry, mid);
+    const simplified = simplifyPatch(geometry, mid, options);
     const count = countVertices(simplified);
 
     if (count > targetVertices) {

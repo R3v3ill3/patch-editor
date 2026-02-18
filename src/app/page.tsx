@@ -17,13 +17,19 @@ import ValidationBar from '@/components/ValidationBar';
 import ImportDialog from '@/components/ImportDialog';
 import NewPatchDialog from '@/components/NewPatchDialog';
 import PostEditDialog from '@/components/PostEditDialog';
+import AlignmentPreviewDialog from '@/components/AlignmentPreviewDialog';
 import { validateOverlaps } from '@/lib/validation';
 import { convertGeoJSONToWKT, ensureMultiPolygon } from '@/lib/geojson';
 import {
   analysePostEdit,
   extractSegmentFromRing,
-  syncAdjacentBoundary,
+  syncBoundaryByProjection,
+  syncBoundaryByDisplacement,
+  generateBoundaryProposals,
+  detectNeighbors,
   type PostEditAnalysis,
+  type BoundaryProposal,
+  type AdjacentPatchInfo,
 } from '@/lib/geometry-edit';
 import { exportGeoJSON } from '@/components/ExportButton';
 import { supabase } from '@/lib/supabase';
@@ -59,7 +65,52 @@ export default function EditorPage() {
   const [showPostEditDialog, setShowPostEditDialog] = useState(false);
   const [postEditPatchCode, setPostEditPatchCode] = useState<string>('');
   const [postEditNewGeometry, setPostEditNewGeometry] = useState<MultiPolygon | null>(null);
+  const [postEditOldGeometry, setPostEditOldGeometry] = useState<MultiPolygon | null>(null);
   const [gapPreview, setGapPreview] = useState<GeoJSON.Feature | null>(null);
+
+  // Pre-edit neighbor detection state (for linked boundary editing)
+  const [preEditNeighbors, setPreEditNeighbors] = useState<AdjacentPatchInfo[]>([]);
+  const [linkedPatchIds, setLinkedPatchIds] = useState<Set<string>>(new Set());
+  const [neighborsLoading, setNeighborsLoading] = useState(false);
+
+  // Alignment preview state
+  const [showAlignmentPreview, setShowAlignmentPreview] = useState(false);
+  const [alignmentProposals, setAlignmentProposals] = useState<BoundaryProposal[]>([]);
+
+  const isEditingBoundary = editor.editMode === 'simplify' || editor.editMode === 'simplify-refine';
+
+  // Compute linked neighbor overlay for map visualization during editing
+  const linkedNeighborOverlay = useMemo((): GeoJSON.FeatureCollection | null => {
+    // #region agent log
+    console.log('[DEBUG] linkedNeighborOverlay useMemo COMPUTING', {isEditingBoundary,preEditNeighborsCount:preEditNeighbors.length,timestamp:Date.now()});
+    // #endregion
+    if (!isEditingBoundary || preEditNeighbors.length === 0) return null;
+
+    const features: GeoJSON.Feature[] = [];
+    for (const neighbor of preEditNeighbors) {
+      const patch = editor.workingFeatureCollection.features.find(
+        f => f.properties.id === neighbor.patchId
+      );
+      if (!patch || !patch.geometry) continue;
+      const isLinked = linkedPatchIds.has(neighbor.patchId);
+      features.push({
+        type: 'Feature',
+        geometry: patch.geometry,
+        properties: {
+          patchId: neighbor.patchId,
+          patchCode: neighbor.patchCode,
+          isLinked,
+        },
+      });
+    }
+
+    // #region agent log
+    console.log('[DEBUG] linkedNeighborOverlay useMemo COMPLETE', {featureCount:features.length,timestamp:Date.now()});
+    // #endregion
+    return features.length > 0
+      ? { type: 'FeatureCollection', features }
+      : null;
+  }, [isEditingBoundary, preEditNeighbors, linkedPatchIds, editor.workingFeatureCollection.features]);
 
   // Duplicate patch warnings
   const duplicateWarnings = useMemo(() => {
@@ -114,14 +165,42 @@ export default function EditorPage() {
   // ── Edit Boundary mode ────────────────────────────────────────────
 
   const handleEditBoundary = useCallback(() => {
+    // #region agent log
+    console.log('[DEBUG] handleEditBoundary ENTRY', {hasSelectedPatch:!!editor.selectedPatch,selectedPatchId:editor.selectedPatch?.properties.id,currentEditMode:editor.editMode,timestamp:Date.now()});
+    // #endregion
     if (!editor.selectedPatch) return;
     setSimplifyOriginalOverlay({
       type: 'Feature',
       geometry: editor.selectedPatch.geometry,
       properties: {},
     });
+
+    // NOTE: Neighbor detection moved to SimplifyPanel after initial simplification
+    // to avoid freezing on high-vertex geometries (can be 30k+ vertices)
+    setPreEditNeighbors([]);
+    setLinkedPatchIds(new Set());
+    setNeighborsLoading(true);
+
+    // #region agent log
+    console.log('[DEBUG] BEFORE enterEditBoundaryMode', {currentEditMode:editor.editMode,timestamp:Date.now()});
+    // #endregion
     editor.enterEditBoundaryMode();
+    // #region agent log
+    console.log('[DEBUG] AFTER enterEditBoundaryMode', {editModeAfterCall:editor.editMode,timestamp:Date.now()});
+    // #endregion
   }, [editor]);
+
+  const handleToggleLink = useCallback((patchId: string) => {
+    setLinkedPatchIds(prev => {
+      const next = new Set(prev);
+      if (next.has(patchId)) {
+        next.delete(patchId);
+      } else {
+        next.add(patchId);
+      }
+      return next;
+    });
+  }, []);
 
   const handleSimplifiedGeometryChange = useCallback((geometry: MultiPolygon) => {
     setSimplifyPreviewOverlay({
@@ -131,80 +210,252 @@ export default function EditorPage() {
     });
   }, []);
 
+  // Called after SimplifyPanel's initial simplification to detect neighbors on simplified geometry
+  const handleInitialSimplificationComplete = useCallback((simplifiedGeometry: MultiPolygon) => {
+    if (!editor.selectedPatch) return;
+    
+    const patchId = editor.selectedPatch.properties.id;
+    // #region agent log
+    console.log('[DEBUG] handleInitialSimplificationComplete - detecting neighbors on simplified geometry', {patchId,timestamp:Date.now()});
+    // #endregion
+    
+    try {
+      const neighbors = detectNeighbors(
+        patchId,
+        simplifiedGeometry,
+        editor.workingFeatureCollection.features
+      );
+      // #region agent log
+      console.log('[DEBUG] Neighbors detected on simplified geometry', {neighborCount:neighbors.length,timestamp:Date.now()});
+      // #endregion
+      setPreEditNeighbors(neighbors);
+      setLinkedPatchIds(new Set(neighbors.map(n => n.patchId)));
+      setNeighborsLoading(false);
+    } catch (err) {
+      console.error('[DEBUG] detectNeighbors on simplified geometry ERROR', err);
+      setPreEditNeighbors([]);
+      setLinkedPatchIds(new Set());
+      setNeighborsLoading(false);
+    }
+  }, [editor]);
+
   const handleRefine = useCallback((geometry: MultiPolygon) => {
     editor.enterRefineMode(geometry);
     setSimplifyPreviewOverlay(null);
   }, [editor]);
 
   // Shared post-edit handler: saves geometry and runs post-edit analysis
+  // With linked boundary support: auto-propagates edits to linked neighbors
   const applyBoundaryEdit = useCallback((geometry: MultiPolygon) => {
-    if (!editor.selectedPatch) return;
+    const vertexCount = geometry.coordinates.reduce((acc,p)=>acc+p.reduce((a,r)=>a+r.length,0),0);
+    console.log('[APPLY-BOUNDARY] START', {
+      hasSelectedPatch: !!editor.selectedPatch,
+      vertexCount,
+      linkedNeighborCount: linkedPatchIds.size,
+    });
+    if (!editor.selectedPatch) {
+      console.log('[APPLY-BOUNDARY] EARLY RETURN - no selected patch');
+      return;
+    }
 
     const patchId = editor.selectedPatch.properties.id;
     const patchCode = editor.selectedPatch.properties.code;
 
-    // Capture old geometry BEFORE updating
+    // Capture old geometry and features BEFORE updating
     const oldGeometry = editor.selectedPatch.geometry.type === 'MultiPolygon'
       ? editor.selectedPatch.geometry as MultiPolygon
       : ensureMultiPolygon(editor.selectedPatch.geometry);
+    // Snapshot the feature list before the edit so duplicate detection
+    // can compare the old geometry against all existing patches.
+    const preEditFeatures = [...editor.workingFeatureCollection.features];
+    console.log('[APPLY-BOUNDARY] Captured state', {
+      patchId: editor.selectedPatch.properties.id,
+      preEditFeaturesCount: preEditFeatures.length,
+    });
 
-    // Apply the edit
+    // Apply the edit to the selected patch
     editor.updateGeometry(patchId, geometry);
 
-    const snapshot = new Map(
-      editor.workingFeatureCollection.features.map(f => [f.properties.id, f.geometry])
-    );
-    snapshot.set(patchId, geometry);
-    history.pushState(snapshot);
-
+    // Exit edit mode and clear overlays
     editor.exitEditMode();
     setSimplifyOriginalOverlay(null);
     setSimplifyPreviewOverlay(null);
 
+    // Clear pre-edit neighbor state
+    const currentLinkedIds = new Set(linkedPatchIds);
+    setPreEditNeighbors([]);
+    setLinkedPatchIds(new Set());
+
+    console.log('[APPLY-BOUNDARY] Before analysis', {linkedCount: currentLinkedIds.size});
+
     // Run post-edit analysis
     try {
+      const analysisStart = performance.now();
+      console.log('[APPLY-BOUNDARY] Calling analysePostEdit', {
+        patchId,
+        preEditFeaturesCount: preEditFeatures.length,
+      });
+      // Pass the pre-edit simplified geometry (if refining was used) so
+      // that analysePostEdit can narrow neighbour proposals to only the
+      // portion of the boundary the user actually edited.  Without this,
+      // the entire shared boundary would be transferred as the simplified
+      // version, creating visible straight-line artefacts.
       const analysis = analysePostEdit(
         patchId,
         oldGeometry,
         geometry,
-        editor.workingFeatureCollection.features
+        preEditFeatures,
+        editor.simplifiedGeometry,
       );
+      console.log('[APPLY-BOUNDARY] analysePostEdit complete', {
+        elapsedMs: Math.round(performance.now() - analysisStart),
+        neighbours: analysis.neighbours.length,
+        duplicates: analysis.duplicates.length,
+        hasGap: !!analysis.gapGeometry,
+      });
 
-      const hasActions = analysis.neighbours.length > 0 || analysis.gapGeometry !== null;
+      // Auto-propagate to linked neighbors
+      const autoApplied: { patchId: string; geometry: MultiPolygon }[] = [];
+      const poorQualityLinked: BoundaryProposal[] = [];
 
-      if (hasActions) {
-        setPostEditAnalysis(analysis);
+      console.log('[APPLY-BOUNDARY] Auto-propagation check', {
+        linkedCount: currentLinkedIds.size,
+        neighborCount: analysis.neighbours.length,
+      });
+
+      if (currentLinkedIds.size > 0 && analysis.neighbours.length > 0) {
+        // Generate proposals for all neighbors
+        // Pass oldGeometry so the displacement approach can compare the
+        // original (full-detail) ring with the new (simplified+edited) ring.
+        const proposals = generateBoundaryProposals(
+          analysis,
+          geometry,
+          editor.workingFeatureCollection.features,
+          oldGeometry,
+        );
+        console.log('[APPLY-BOUNDARY] Proposals generated', {proposalCount: proposals.length});
+        for (const proposal of proposals) {
+          if (!currentLinkedIds.has(proposal.patchId)) continue;
+
+          if (proposal.snapQuality === 'good') {
+            editor.updateGeometry(proposal.patchId, proposal.proposedGeometry);
+            autoApplied.push({ patchId: proposal.patchId, geometry: proposal.proposedGeometry });
+          } else {
+            poorQualityLinked.push(proposal);
+          }
+        }
+        console.log('[APPLY-BOUNDARY] Proposals processed', {
+          autoAppliedCount: autoApplied.length,
+          poorQualityCount: poorQualityLinked.length,
+        });
+      }
+      // Build snapshot including all auto-applied changes
+      const snapshot = new Map(
+        editor.workingFeatureCollection.features.map(f => [f.properties.id, f.geometry])
+      );
+      snapshot.set(patchId, geometry);
+      for (const applied of autoApplied) {
+        snapshot.set(applied.patchId, applied.geometry);
+      }
+      history.pushState(snapshot);
+
+      // Update analysis to reflect auto-applied neighbors
+      const autoAppliedIds = new Set(autoApplied.map(a => a.patchId));
+      const updatedAnalysis: PostEditAnalysis = {
+        ...analysis,
+        neighbours: analysis.neighbours.map(n =>
+          autoAppliedIds.has(n.patchId) ? { ...n, relationship: 'aligned' as const } : n
+        ),
+      };
+
+      // Determine remaining actions
+      const remainingNeighbors = updatedAnalysis.neighbours.filter(
+        n => n.relationship !== 'aligned'
+      );
+      const hasRemainingActions =
+        remainingNeighbors.length > 0 ||
+        updatedAnalysis.duplicates.length > 0 ||
+        updatedAnalysis.gapGeometry !== null ||
+        poorQualityLinked.length > 0;
+
+      console.log('[APPLY-BOUNDARY] Remaining actions', {
+        remainingNeighborCount: remainingNeighbors.length,
+        duplicateCount: updatedAnalysis.duplicates.length,
+        hasGap: !!updatedAnalysis.gapGeometry,
+        poorQualityLinkedCount: poorQualityLinked.length,
+        hasRemainingActions,
+        autoAppliedCount: autoApplied.length,
+      });
+
+      // Show results
+      if (autoApplied.length > 0) {
+        showToast(
+          `Boundary updated — ${autoApplied.length} linked neighbor${autoApplied.length !== 1 ? 's' : ''} auto-aligned`,
+          'success'
+        );
+      }
+
+      if (hasRemainingActions) {
+        console.log('[APPLY-BOUNDARY] Setting dialog state', {patchCode});
+        setPostEditAnalysis(updatedAnalysis);
         setPostEditPatchCode(patchCode);
         setPostEditNewGeometry(geometry);
+        setPostEditOldGeometry(oldGeometry);
         setShowPostEditDialog(true);
 
-        // Show gap on map if detected
-        if (analysis.gapGeometry) {
-          setGapPreview(analysis.gapGeometry);
+        if (updatedAnalysis.gapGeometry) {
+          setGapPreview(updatedAnalysis.gapGeometry);
         }
 
-        showToast('Boundary updated -- review post-edit actions', 'info');
-      } else {
+        // If there are poor-quality linked neighbors, open alignment preview directly
+        if (poorQualityLinked.length > 0 && remainingNeighbors.length === 0 && updatedAnalysis.duplicates.length === 0) {
+          setAlignmentProposals(poorQualityLinked);
+          setShowAlignmentPreview(true);
+          showToast('Some linked neighbors need manual review', 'info');
+        } else if (autoApplied.length === 0) {
+          showToast('Boundary updated — review post-edit actions', 'info');
+        }
+      } else if (autoApplied.length === 0) {
         showToast('Boundary updated', 'success');
       }
     } catch (err) {
-      console.warn('Post-edit analysis failed:', err);
+      console.error('[APPLY-BOUNDARY] Analysis error:', err);
+      // Still push history for the main edit even if analysis fails
+      const snapshot = new Map(
+        editor.workingFeatureCollection.features.map(f => [f.properties.id, f.geometry])
+      );
+      snapshot.set(patchId, geometry);
+      history.pushState(snapshot);
       showToast('Boundary updated', 'success');
     }
-  }, [editor, history, showToast]);
+  }, [editor, history, showToast, linkedPatchIds]);
 
   const handleRefineComplete = useCallback((geometry: MultiPolygon) => {
     applyBoundaryEdit(geometry);
   }, [applyBoundaryEdit]);
 
   const handleApplySimplification = useCallback((geometry: MultiPolygon) => {
+    // #region agent log
+    const vtxCount = geometry.coordinates.reduce((acc,p)=>acc+p.reduce((a,r)=>a+r.length,0),0);
+    console.log('[DEBUG] handleApplySimplification ENTRY', {
+      polygonCount: geometry.coordinates.length,
+      totalVertexCount: vtxCount,
+      timestamp: Date.now()
+    });
+    // #endregion
     applyBoundaryEdit(geometry);
+    // #region agent log
+    console.log('[DEBUG] handleApplySimplification AFTER applyBoundaryEdit returned', {timestamp:Date.now()});
+    // #endregion
   }, [applyBoundaryEdit]);
 
   const handleCancelEdit = useCallback(() => {
     editor.exitEditMode();
     setSimplifyOriginalOverlay(null);
     setSimplifyPreviewOverlay(null);
+    setPreEditNeighbors([]);
+    setLinkedPatchIds(new Set());
+    setNeighborsLoading(false);
   }, [editor]);
 
   // ── Post-edit actions ─────────────────────────────────────────────
@@ -253,27 +504,49 @@ export default function EditorPage() {
         : ensureMultiPolygon(neighbourPatch.geometry);
 
       const { adjacentInfo } = neighbourInfo;
-      const editedRing = postEditNewGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
-      if (!editedRing) {
-        skippedCount++;
-        continue;
+
+      // Prefer displacement approach when old geometry is available
+      let updatedNeighbour: MultiPolygon | null = null;
+
+      if (postEditOldGeometry) {
+        const oldRing = postEditOldGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
+        const newRing = postEditNewGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
+        if (oldRing && newRing) {
+          const { geometry, displacedCount } = syncBoundaryByDisplacement(
+            neighbourGeom,
+            oldRing,
+            newRing,
+            adjacentInfo.polygonIndex,
+            adjacentInfo.ringIndex,
+          );
+          if (displacedCount > 0) {
+            updatedNeighbour = geometry;
+          }
+        }
       }
 
-      const newSegment = extractSegmentFromRing(
-        editedRing,
-        adjacentInfo.editedStartIndex,
-        adjacentInfo.editedEndIndex
-      );
-      if (newSegment.length < 3) {
-        skippedCount++;
-        continue;
+      // Fallback to projection if displacement didn't work
+      if (!updatedNeighbour) {
+        const editedRing = postEditNewGeometry.coordinates[adjacentInfo.editedPolygonIndex]?.[adjacentInfo.editedRingIndex];
+        if (!editedRing) {
+          skippedCount++;
+          continue;
+        }
+        const newSegment = extractSegmentFromRing(
+          editedRing,
+          adjacentInfo.editedStartIndex,
+          adjacentInfo.editedEndIndex,
+        );
+        if (newSegment.length < 2) {
+          skippedCount++;
+          continue;
+        }
+        ({ geometry: updatedNeighbour } = syncBoundaryByProjection(
+          neighbourGeom,
+          newSegment,
+          adjacentInfo,
+        ));
       }
-
-      const updatedNeighbour = syncAdjacentBoundary(
-        neighbourGeom,
-        newSegment,
-        adjacentInfo
-      );
 
       const updatedRing = updatedNeighbour.coordinates[adjacentInfo.polygonIndex]?.[adjacentInfo.ringIndex];
       const isRingClosed = !!updatedRing &&
@@ -311,7 +584,7 @@ export default function EditorPage() {
         ),
       };
     });
-  }, [postEditAnalysis, postEditNewGeometry, editor, showToast]);
+  }, [postEditAnalysis, postEditNewGeometry, postEditOldGeometry, editor, showToast]);
 
   const handleCreateGapPatch = useCallback((gapGeometry: Feature<Polygon | MultiPolygon>) => {
     const geometry = gapGeometry.geometry.type === 'MultiPolygon'
@@ -322,11 +595,88 @@ export default function EditorPage() {
     setShowNewPatchDialog(true);
   }, []);
 
+  const handleOpenAlignmentPreview = useCallback(() => {
+    if (!postEditAnalysis || !postEditNewGeometry) return;
+
+    try {
+      const proposals = generateBoundaryProposals(
+        postEditAnalysis,
+        postEditNewGeometry,
+        editor.workingFeatureCollection.features,
+        postEditOldGeometry ?? undefined,
+      );
+
+      setAlignmentProposals(proposals);
+      setShowAlignmentPreview(true);
+    } catch (err) {
+      console.error('Failed to generate boundary proposals:', err);
+      showToast('Failed to generate alignment proposals', 'error');
+    }
+  }, [postEditAnalysis, postEditNewGeometry, postEditOldGeometry, editor.workingFeatureCollection.features, showToast]);
+
+  const handleUpdateProposal = useCallback((patchId: string, newGeometry: MultiPolygon) => {
+    setAlignmentProposals(prev =>
+      prev.map(p =>
+        p.patchId === patchId
+          ? (() => {
+              const ring = newGeometry.coordinates[p.adjacentInfo.polygonIndex]?.[p.adjacentInfo.ringIndex];
+              const updatedSegment = ring
+                ? extractSegmentFromRing(ring, p.adjacentInfo.startIndex, p.adjacentInfo.endIndex)
+                : p.proposedSegment;
+
+              return {
+                ...p,
+                proposedGeometry: newGeometry,
+                proposedSegment: updatedSegment,
+                changedSegment: updatedSegment,
+              };
+            })()
+          : p
+      )
+    );
+  }, []);
+
+  const handleApplyAlignments = useCallback((selectedPatchIds: string[]) => {
+    const selectedProposals = alignmentProposals.filter(p => selectedPatchIds.includes(p.patchId));
+    
+    let appliedCount = 0;
+    for (const proposal of selectedProposals) {
+      editor.updateGeometry(proposal.patchId, proposal.proposedGeometry);
+      appliedCount++;
+    }
+
+    if (appliedCount > 0) {
+      showToast(`${appliedCount} neighbor${appliedCount !== 1 ? 's' : ''} aligned`, 'success');
+    }
+
+    // Update the analysis to reflect aligned neighbours
+    setPostEditAnalysis(prev => {
+      if (!prev) return null;
+      const alignedIds = new Set(selectedPatchIds);
+      return {
+        ...prev,
+        neighbours: prev.neighbours.map(n =>
+          alignedIds.has(n.patchId) ? { ...n, relationship: 'aligned' as const } : n
+        ),
+      };
+    });
+
+    // Close the alignment preview dialog
+    setShowAlignmentPreview(false);
+    setAlignmentProposals([]);
+  }, [alignmentProposals, editor, showToast]);
+
+  const handleCloseAlignmentPreview = useCallback(() => {
+    setShowAlignmentPreview(false);
+    setAlignmentProposals([]);
+  }, []);
+
   const handlePostEditDone = useCallback(() => {
     setShowPostEditDialog(false);
     setPostEditAnalysis(null);
     setPostEditPatchCode('');
     setPostEditNewGeometry(null);
+    setPostEditOldGeometry(null);
     setGapPreview(null);
   }, []);
 
@@ -559,8 +909,6 @@ export default function EditorPage() {
 
   if (!user) return null;
 
-  const isEditingBoundary = editor.editMode === 'simplify' || editor.editMode === 'simplify-refine';
-
   return (
     <div className="h-screen flex flex-col overflow-hidden">
       {/* Toolbar */}
@@ -622,11 +970,22 @@ export default function EditorPage() {
           </div>
 
           {/* Edit Boundary panel (simplify slider + refine) */}
+          {(() => {
+            // #region agent log
+            console.log('[DEBUG] SimplifyPanel RENDER CHECK', {hasSelectedPatch:!!editor.selectedPatch,isEditingBoundary,editMode:editor.editMode,willRender:!!(editor.selectedPatch&&isEditingBoundary),timestamp:Date.now()});
+            // #endregion
+            return null;
+          })()}
           {editor.selectedPatch && isEditingBoundary && (
             <SimplifyPanel
               patch={editor.selectedPatch}
               isRefining={editor.editMode === 'simplify-refine'}
+              neighbors={preEditNeighbors}
+              neighborsLoading={neighborsLoading}
+              linkedPatchIds={linkedPatchIds}
+              onToggleLink={handleToggleLink}
               onSimplifiedGeometryChange={handleSimplifiedGeometryChange}
+              onInitialSimplificationComplete={handleInitialSimplificationComplete}
               onRefine={handleRefine}
               onApply={handleApplySimplification}
               onCancel={handleCancelEdit}
@@ -659,6 +1018,7 @@ export default function EditorPage() {
                 : null
             }
             gapPreview={gapPreview}
+            linkedNeighborOverlay={linkedNeighborOverlay}
             onPatchClick={handlePatchClick}
             onMapReady={setMapInstance}
           />
@@ -700,9 +1060,22 @@ export default function EditorPage() {
         analysis={postEditAnalysis ?? { duplicates: [], neighbours: [], gapGeometry: null, gapAreaSqm: 0 }}
         onApplyToDuplicates={handleApplyToDuplicates}
         onAlignNeighbours={handleAlignNeighbours}
+        onOpenAlignmentPreview={handleOpenAlignmentPreview}
         onCreateGapPatch={handleCreateGapPatch}
         onDone={handlePostEditDone}
       />
+
+      {showAlignmentPreview && postEditNewGeometry && (
+        <AlignmentPreviewDialog
+          isOpen={showAlignmentPreview}
+          editedPatchCode={postEditPatchCode}
+          editedGeometry={postEditNewGeometry}
+          proposals={alignmentProposals}
+          onUpdateProposal={handleUpdateProposal}
+          onApply={handleApplyAlignments}
+          onClose={handleCloseAlignmentPreview}
+        />
+      )}
     </div>
   );
 }

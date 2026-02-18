@@ -43,12 +43,13 @@ interface MapViewProps {
   editingPatchId: string | null;
   simplifyOverlay?: SimplifyOverlay | null;
   gapPreview?: GeoJSON.Feature | null;
+  linkedNeighborOverlay?: GeoJSON.FeatureCollection | null;
   onPatchClick: (patchId: string) => void;
   onMapReady?: (map: maplibregl.Map) => void;
 }
 
 const MapView = forwardRef<MapViewHandle, MapViewProps>(function MapView(
-  { featureCollection, selectedPatchId, overlaps, editingPatchId, simplifyOverlay, gapPreview, onPatchClick, onMapReady },
+  { featureCollection, selectedPatchId, overlaps, editingPatchId, simplifyOverlay, gapPreview, linkedNeighborOverlay, onPatchClick, onMapReady },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -256,6 +257,49 @@ const MapView = forwardRef<MapViewHandle, MapViewProps>(function MapView(
         },
       });
 
+      // Linked neighbor overlay layers (during boundary editing)
+      map.addSource('linked-neighbors', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+
+      map.addLayer({
+        id: 'linked-neighbors-fill',
+        type: 'fill',
+        source: 'linked-neighbors',
+        paint: {
+          'fill-color': [
+            'case',
+            ['==', ['get', 'isLinked'], true],
+            '#6366f1', // indigo for linked
+            '#9ca3af', // gray for unlinked
+          ],
+          'fill-opacity': 0.12,
+        },
+      });
+
+      map.addLayer({
+        id: 'linked-neighbors-outline',
+        type: 'line',
+        source: 'linked-neighbors',
+        paint: {
+          'line-color': [
+            'case',
+            ['==', ['get', 'isLinked'], true],
+            '#6366f1', // indigo for linked
+            '#9ca3af', // gray for unlinked
+          ],
+          'line-width': [
+            'case',
+            ['==', ['get', 'isLinked'], true],
+            2.5,
+            1.5,
+          ],
+          'line-dasharray': [4, 3],
+          'line-opacity': 0.7,
+        },
+      });
+
       // Click handler for patches
       map.on('click', 'patches-fill', (e) => {
         if (e.features && e.features.length > 0) {
@@ -366,6 +410,21 @@ const MapView = forwardRef<MapViewHandle, MapViewProps>(function MapView(
       source.setData({ type: 'FeatureCollection', features: [] });
     }
   }, [gapPreview]);
+
+  // Update linked neighbor overlay
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady.current) return;
+
+    const source = map.getSource('linked-neighbors') as maplibregl.GeoJSONSource | undefined;
+    if (!source) return;
+
+    if (linkedNeighborOverlay) {
+      source.setData(linkedNeighborOverlay as GeoJSON.FeatureCollection);
+    } else {
+      source.setData({ type: 'FeatureCollection', features: [] });
+    }
+  }, [linkedNeighborOverlay]);
 
   // Update selected state
   const prevSelectedRef = useRef<string | null>(null);
