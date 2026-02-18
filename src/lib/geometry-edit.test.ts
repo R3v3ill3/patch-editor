@@ -1464,8 +1464,7 @@ test('syncBoundaryByDisplacement works with different vertex counts (simplificat
   assert.equal(displacedCount, 5, '5 vertices displaced');
 });
 
-test('generateBoundaryProposals uses displacement when oldEditedGeometry provided', () => {
-  // Use realistic coordinates (~100m displacements)
+test('generateBoundaryProposals uses exact-copy when oldEditedGeometry provided', () => {
   // OLD edited geometry: full detail, eastern boundary at x=150.002
   const oldGeometry = {
     type: 'MultiPolygon' as const,
@@ -1481,13 +1480,15 @@ test('generateBoundaryProposals uses displacement when oldEditedGeometry provide
     ]]],
   };
 
-  // NEW edited geometry: simplified, user moved part to x=150.001 (~100m west)
+  // NEW edited geometry: simplified, user moved middle vertices to x=150.001
   const editedGeometry = {
     type: 'MultiPolygon' as const,
     coordinates: [[[
       [150.0, -33.0],
       [150.002, -33.0],
+      [150.001, -33.001],
       [150.001, -33.002],
+      [150.001, -33.003],
       [150.002, -33.004],
       [150.0, -33.004],
       [150.0, -33.0],
@@ -1496,20 +1497,20 @@ test('generateBoundaryProposals uses displacement when oldEditedGeometry provide
 
   // Neighbour with detailed western boundary at x=150.002
   const neighbour = makePatch('n1', 'N-001', [[
-    [150.002, -33.004],
-    [150.002, -33.003],
-    [150.002, -33.002],
-    [150.002, -33.001],
     [150.002, -33.0],
-    [150.006, -33.0],
-    [150.006, -33.004],
+    [150.002, -33.001],
+    [150.002, -33.002],
+    [150.002, -33.003],
     [150.002, -33.004],
+    [150.006, -33.004],
+    [150.006, -33.0],
+    [150.002, -33.0],
   ]]);
 
   const analysis = analysePostEdit('edited', oldGeometry, editedGeometry, [neighbour]);
   assert.ok(analysis.neighbours.length >= 1, 'should detect neighbour');
 
-  // Pass oldGeometry as 4th argument to enable displacement
+  // Pass oldGeometry as 4th argument to enable exact-copy splice
   const proposals = generateBoundaryProposals(
     analysis, editedGeometry, [neighbour], oldGeometry,
   );
@@ -1517,22 +1518,21 @@ test('generateBoundaryProposals uses displacement when oldEditedGeometry provide
 
   const proposedRing = proposals[0].proposedGeometry.coordinates[0][0];
 
-  // Vertex count should be PRESERVED (displacement doesn't add/remove vertices)
-  assert.equal(
-    proposedRing.length,
-    neighbour.geometry.coordinates[0][0].length,
-    'vertex count preserved with displacement',
-  );
-
-  // At least one vertex should have moved inward (x < 150.002)
-  const movedVertices = proposedRing.filter(
-    (v: Position) => v[0] < 150.0019,
+  // The edited vertices should be EXACT COPIES from the edited ring
+  const editedVertices = proposedRing.filter(
+    (v: Position) => Math.abs(v[0] - 150.001) < 0.0001,
   );
   assert.ok(
-    movedVertices.length >= 1,
-    `expected ≥1 vertices displaced inward, got ${movedVertices.length}. ` +
+    editedVertices.length >= 2,
+    `expected ≥2 vertices at x≈150.001 (exact copy), got ${editedVertices.length}. ` +
     `x-values: ${proposedRing.map((v: Position) => v[0].toFixed(4))}`,
   );
+
+  // Non-shared vertices should be preserved
+  const nonShared = proposedRing.filter(
+    (v: Position) => Math.abs(v[0] - 150.006) < 0.0001,
+  );
+  assert.ok(nonShared.length >= 2, 'non-shared vertices preserved');
 });
 
 // ── syncBoundaryExactCopy tests ──────────────────────────────────────

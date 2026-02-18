@@ -591,7 +591,7 @@ export default function EditorPage() {
         ),
       };
     });
-  }, [postEditAnalysis, postEditNewGeometry, postEditOldGeometry, editor, showToast]);
+  }, [postEditAnalysis, postEditNewGeometry, postEditOldGeometry, postEditPreSimplifiedGeometry, editor, showToast]);
 
   const handleCreateGapPatch = useCallback((gapGeometry: Feature<Polygon | MultiPolygon>) => {
     const geometry = gapGeometry.geometry.type === 'MultiPolygon'

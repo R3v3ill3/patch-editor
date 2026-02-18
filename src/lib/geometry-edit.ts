@@ -1675,27 +1675,56 @@ export function syncBoundaryExactCopy(
 
   // ── Step 5: Determine splice direction ───────────────────────────
   // The neighbour's ring might go in the opposite direction.
-  // Check by comparing the order of anchors on the neighbour's ring.
+  // We check both possible directions (forward: start→end, backward:
+  // start→...→0→...→end wrapping) and pick the one where ALL
+  // intermediate vertices are shared (close to old ring).
   let nbrSpliceStart: number;
   let nbrSpliceEnd: number;
   let needsReverse: boolean;
 
-  // The shared section on the neighbour goes from bestStartIdx to bestEndIdx.
-  // Determine which direction:
-  // If going from start→end in ring order covers fewer vertices, that's forward.
-  const fwdCount = (bestEndIdx - bestStartIdx + nbrOpenCount) % nbrOpenCount;
-  const bwdCount = (bestStartIdx - bestEndIdx + nbrOpenCount) % nbrOpenCount;
+  const closeToOldSet = new Set(closeToOld.map(c => c.idx));
 
-  if (fwdCount <= bwdCount) {
-    // Forward: start→end in ring order
+  // Check forward direction: bestStartIdx → bestEndIdx
+  let fwdAllShared = true;
+  const fwdLen = (bestEndIdx - bestStartIdx + nbrOpenCount) % nbrOpenCount;
+  for (let step = 1; step < fwdLen; step++) {
+    const idx = (bestStartIdx + step) % nbrOpenCount;
+    if (!closeToOldSet.has(idx)) {
+      fwdAllShared = false;
+      break;
+    }
+  }
+
+  // Check backward direction: bestEndIdx → bestStartIdx
+  let bwdAllShared = true;
+  const bwdLen = (bestStartIdx - bestEndIdx + nbrOpenCount) % nbrOpenCount;
+  for (let step = 1; step < bwdLen; step++) {
+    const idx = (bestEndIdx + step) % nbrOpenCount;
+    if (!closeToOldSet.has(idx)) {
+      bwdAllShared = false;
+      break;
+    }
+  }
+
+  if (fwdAllShared && !bwdAllShared) {
     nbrSpliceStart = bestStartIdx;
     nbrSpliceEnd = bestEndIdx;
     needsReverse = false;
-  } else {
-    // Backward: end→start in ring order
+  } else if (bwdAllShared && !fwdAllShared) {
     nbrSpliceStart = bestEndIdx;
     nbrSpliceEnd = bestStartIdx;
     needsReverse = true;
+  } else {
+    // Both or neither direction is all-shared; fall back to shorter path
+    if (fwdLen <= bwdLen) {
+      nbrSpliceStart = bestStartIdx;
+      nbrSpliceEnd = bestEndIdx;
+      needsReverse = false;
+    } else {
+      nbrSpliceStart = bestEndIdx;
+      nbrSpliceEnd = bestStartIdx;
+      needsReverse = true;
+    }
   }
 
   // Build the replacement (reverse if needed)
